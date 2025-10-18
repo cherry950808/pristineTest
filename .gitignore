@@ -1,3 +1,8 @@
 dataset/
 result/
 *.pyc
+__pycache__/
+all_model/mae2/__pycache__/
+dataset/__pycache__/
+Tool/__pycache__/
+utils/__pycache__/
