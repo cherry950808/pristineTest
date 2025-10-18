@@ -11,14 +11,15 @@ import torch
 import torch.nn.functional as F
 import pandas as pd
 import torch.optim as optim
+import distutils.version
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils.kit import get_cosine_schedule_with_warmup,getMaxValue,convert,convert2,deconvert2,entropy_loss, mixup
 from Load_Videos import Get_Dataloader,Get_lx_sux_wux_Dataloader_forSI9
 from utils import AverageMeter, accuracy
 import torch.distributed as dist
-from Tool.OTSU import OTSU_threshold
-from Tool.SuperAugmentation import Super_Augmentation
+# from Tool.OTSU import OTSU_threshold
+# from Tool.SuperAugmentation import Super_Augmentation
 from Tool.BalancedDataParallel import BalancedDataParallel as BDP
 #from torch.cuda import amp
 
@@ -57,6 +58,10 @@ def set_seed(args):
 
 def main():
     parser = argparse.ArgumentParser(description='PyTorch FixMatch Training')
+
+    parser.add_argument('--tau', type=float, default=0.6,
+                    help='global pseudo-label threshold for unlabeled consistency')
+
     parser.add_argument('--gpu-id', default=0, type=int,
                         help='id(s) for CUDA_VISIBLE_DEVICES')
     parser.add_argument('--num-workers', type=int, default=0,
@@ -64,8 +69,8 @@ def main():
     parser.add_argument('--dataset', default='Fire', type=str,
                         choices=['cifar10', 'cifar100','ucf101','Fire'],
                         help='dataset name')
-    parser.add_argument('--num-classes', default=9, type=int,  #------------cls num--------------
-                        help='class num of dataset')
+    parser.add_argument('--num-classes', default=2, type=int,  #------------cls num--------------
+                        help='number of output classes: 2 for fire vs non-fire')
     parser.add_argument("--expand-labels", action="store_true",
                         help="expand labels to fit eval steps")
     #------------------------------------------------------
@@ -170,8 +175,8 @@ def main():
         model = vit(num_classes=args.num_classes, embed_dim=args.embed_dim, img_size=args.input_size)
         #
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,6"
-        device_ids = [0,1,2]
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        device_ids = [0]
         model = torch.nn.DataParallel(model, device_ids=device_ids)
 
 
@@ -307,8 +312,8 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
     best_acc5_a = 0
     test_accs = []
     end = time.time()
-    OTSU_dict = {}
-    history_dict = {}
+    # OTSU_dict = {}
+    # history_dict = {}
     
 
 
@@ -406,15 +411,15 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
                 inputs_u_s, _, _ = strong_iter.__next__()
 
 
-            index_u = index_u.tolist()
-            for value in index_u:
-                if value in history_dict:
-                    OTSU_dict[value] = OTSU_threshold(history_dict[value])
-                else:
-                    history_dict[value] = []
-            for idx, value in enumerate(index_u):
-                if len(history_dict[value])!=0 and history_dict[value][-1] < OTSU_dict[value]:
-                    inputs_u_s[idx] = Super_Augmentation(inputs_u_s[idx].clone().detach())
+            # index_u = index_u.tolist()
+            # for value in index_u:
+            #     if value in history_dict:
+            #         OTSU_dict[value] = OTSU_threshold(history_dict[value])
+            #     else:
+            #         history_dict[value] = []
+            # for idx, value in enumerate(index_u):
+            #     if len(history_dict[value])!=0 and history_dict[value][-1] < OTSU_dict[value]:
+            #         inputs_u_s[idx] = Super_Augmentation(inputs_u_s[idx].clone().detach())
 
 
 
@@ -460,59 +465,66 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
             inputs_y_ulb = torch.softmax(logits_u_w.detach()/args.T, dim=-1)
             inputs_x_ulb = inputs_x_ulb.cpu().clone().numpy()
             inputs_y_ulb = inputs_y_ulb.cpu().clone().numpy()
-            indices = np.where(inputs_y_ulb[:, 0] > args.list_threshold)[0]
+            # indices = np.where(inputs_y_ulb[:, 0] > args.list_threshold)[0]
 
-            list_x_ulb = inputs_x_ulb[indices]
-            list_y_ulb = inputs_y_ulb[indices]
-            list_x_ulb = torch.tensor(list_x_ulb).to(args.device)
-            list_y_ulb = torch.tensor(list_y_ulb).to(args.device)
+            # list_x_ulb = inputs_x_ulb[indices]
+            # list_y_ulb = inputs_y_ulb[indices]
+            # list_x_ulb = torch.tensor(list_x_ulb).to(args.device)
+            # list_y_ulb = torch.tensor(list_y_ulb).to(args.device)
 
-            list_x_ulb = torch.cat((list_x_ulb,inputs_x))
-            max_indices = torch.argmax(list_y_ulb, dim=1)
-            labels = 1 - max_indices
+            # list_x_ulb = torch.cat((list_x_ulb,inputs_x))
+            # max_indices = torch.argmax(list_y_ulb, dim=1)
+            # labels = 1 - max_indices
             # print(labels.shape[0])
-            list_y_ulb = torch.cat((labels,targets_x))
-
+            # list_y_ulb = torch.cat((labels,targets_x))
+            #以上注释是未标注样本并入标注队列的VCAM，以下两行是VCSA最小版
+            list_x_ulb = inputs_x.clone()
+            list_y_ulb = targets_x.clone()
+            ###################################
             # --------------------------------------------
             pseudo_label = torch.softmax(logits_u_w.detach() / args.T, dim=-1)
 
             max_probs, targets_u = torch.max(pseudo_label, dim=-1)
-            if t == 0:
-                global_threshold = default_threshold
-                for _ in range(classnum):
-                    local_p.append(default_threshold)
-                max_local_p = getMaxValue(local_p)
-                MaxNorm_p = [x / max_local_p for x in local_p]
-                final_threshold = [x * global_threshold for x in MaxNorm_p]
-                t = t + 1
-            else:
-                qbc = pseudo_label.tolist()
-                g_threshold = max_probs.tolist()
-                total_maxqb = sum(g_threshold)
-                global_threshold = ema_lamda + (1 - ema_lamda) * (1 / max_probs.shape[0]) * total_maxqb
+            tau = getattr(args, "tau", 0.6)   # 若未在 argparse 里定义，会用 0.6
+            threshold = torch.full_like(max_probs, fill_value=tau, device=args.device)
+            mask = (max_probs >= threshold).float()
+            
+            # if t == 0:
+            #     global_threshold = default_threshold
+            #     for _ in range(classnum):
+            #         local_p.append(default_threshold)
+            #     max_local_p = getMaxValue(local_p)
+            #     MaxNorm_p = [x / max_local_p for x in local_p]
+            #     final_threshold = [x * global_threshold for x in MaxNorm_p]
+            #     t = t + 1
+            # else:
+            #     qbc = pseudo_label.tolist()
+            #     g_threshold = max_probs.tolist()
+            #     total_maxqb = sum(g_threshold)
+            #     global_threshold = ema_lamda + (1 - ema_lamda) * (1 / max_probs.shape[0]) * total_maxqb
 
-                for i in range(classnum):
-                    pt = ema_lamda * local_p[i] + (1 - ema_lamda) * (1 / max_probs.shape[0]) * qbc[0][i]
-                    local_p[i] = pt
+            #     for i in range(classnum):
+            #         pt = ema_lamda * local_p[i] + (1 - ema_lamda) * (1 / max_probs.shape[0]) * qbc[0][i]
+            #         local_p[i] = pt
 
-                max_local_p = getMaxValue(local_p)
-                MaxNorm_p = [x / max_local_p for x in local_p]
-                final_threshold = [x * global_threshold for x in MaxNorm_p]
-                t = t + 1
-                probs_x_ulb = pseudo_label
-                p_model = p_model * ema_lamda + (1 - ema_lamda) * probs_x_ulb.mean(dim=0)
-                max_idx = targets_u
-                hist = torch.bincount(max_idx.reshape(-1), minlength=p_model.shape[0]).to(p_model.dtype)
-                label_hist = label_hist * ema_lamda + (1 - ema_lamda) * (hist / hist.sum())
+            #     max_local_p = getMaxValue(local_p)
+            #     MaxNorm_p = [x / max_local_p for x in local_p]
+            #     final_threshold = [x * global_threshold for x in MaxNorm_p]
+            #     t = t + 1
+            probs_x_ulb = pseudo_label
+            p_model = p_model * ema_lamda + (1 - ema_lamda) * probs_x_ulb.mean(dim=0)
+            max_idx = targets_u
+            hist = torch.bincount(max_idx.reshape(-1), minlength=p_model.shape[0]).to(p_model.dtype)
+            label_hist = label_hist * ema_lamda + (1 - ema_lamda) * (hist / hist.sum())
 
-            f_threshold = []
+            # f_threshold = []
 
-            for i in targets_u:
-                f_threshold.append(final_threshold[i.int()])
-            threshold = torch.tensor(f_threshold)
-            threshold = threshold.to(args.device)
+            # for i in targets_u:
+            #     f_threshold.append(final_threshold[i.int()])
+            # threshold = torch.tensor(f_threshold)
+            # threshold = threshold.to(args.device)
 
-            mask = torch.ge(max_probs, threshold).float()  
+            # mask = torch.ge(max_probs, threshold).float()   
 
             t_u += targets_u.tolist()
             t_u_x += targets_u_x.tolist()
@@ -562,14 +574,14 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
 
 
 
-            update_dict = (F.cross_entropy(logits_u_s.clone().detach(), targets_u.clone().detach(),
-                                  reduction='none'))
-            update_dict = update_dict.tolist()
-            flag = 0
-            for index in index_u:
-                history_dict[index].append(update_dict[flag])
-                flag +=1
-            flag = 0
+            # update_dict = (F.cross_entropy(logits_u_s.clone().detach(), targets_u.clone().detach(),
+            #                       reduction='none'))
+            # update_dict = update_dict.tolist()
+            # flag = 0
+            # for index in index_u:
+            #     history_dict[index].append(update_dict[flag])
+            #     flag +=1
+            # flag = 0
 
 
             Lu = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
