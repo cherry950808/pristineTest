@@ -2,6 +2,14 @@ import argparse
 import logging
 import math
 import os
+
+# 彻底抑制FFmpeg和OpenCV的警告信息 - 必须在导入其他库之前设置
+os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'fflags;+ignidx'
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+os.environ['OPENCV_VIDEOIO_DEBUG'] = '0'
+os.environ['FFMPEG_LOGLEVEL'] = 'error'
+os.environ['GST_DEBUG'] = '0'
+
 import random
 import shutil
 import time
