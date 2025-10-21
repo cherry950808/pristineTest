@@ -1,6 +1,10 @@
 import os
 from pathlib import Path
 
+# 抑制FFmpeg和OpenCV的警告信息
+os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'fflags;+ignidx'
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+
 import random
 import math
 
@@ -26,6 +30,75 @@ def set_seed(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = False
+
+def validate_video_file(video_path):
+    """
+    验证视频文件是否可以被正确解码
+    """
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return False, "Cannot open video file"
+        
+        # 尝试读取第一帧
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            return False, "Cannot read first frame"
+        
+        # 检查帧尺寸
+        height, width = frame.shape[:2]
+        if height <= 0 or width <= 0:
+            cap.release()
+            return False, "Invalid frame dimensions"
+        
+        # 获取总帧数
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count <= 0:
+            cap.release()
+            return False, "Invalid frame count"
+        
+        cap.release()
+        return True, f"Valid video: {width}x{height}, {frame_count} frames"
+        
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+def convert_video_format(input_path, output_path=None):
+    """
+    使用FFmpeg转换视频格式，解决H.264解码问题
+    """
+    import subprocess
+    
+    if output_path is None:
+        # 生成临时文件名
+        base_name = os.path.splitext(input_path)[0]
+        output_path = f"{base_name}_converted.mp4"
+    
+    try:
+        # 使用FFmpeg重新编码视频，确保H.264兼容性
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-c:v', 'libx264',  # 使用H.264编码器
+            '-preset', 'fast',   # 快速编码
+            '-crf', '23',        # 质量参数
+            '-c:a', 'aac',       # 音频编码
+            '-y',                # 覆盖输出文件
+            output_path
+        ]
+        
+        # 静默运行FFmpeg
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return True, output_path
+        else:
+            return False, f"FFmpeg error: {result.stderr}"
+            
+    except FileNotFoundError:
+        return False, "FFmpeg not found. Please install FFmpeg."
+    except Exception as e:
+        return False, f"Conversion error: {str(e)}"
         torch.backends.cudnn.deterministic = True
     return 1
 
@@ -342,14 +415,28 @@ class VideoDataset(Dataset):
             video = np.array(video_frames)
             
         elif fname.endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            # MP4等视频文件加载逻辑
+            # MP4等视频文件加载逻辑 - 优化H.264解码
             try:
+                # 首先验证视频文件
+                is_valid, validation_msg = validate_video_file(fname)
+                if not is_valid:
+                    print(f"Video validation failed for {fname}: {validation_msg}")
+                    return None
+                
+                # 设置OpenCV解码参数，减少H.264警告
                 video_stream = cv2.VideoCapture(fname)
+                
+                # 优化解码器参数
+                video_stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少缓冲区大小
+                video_stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'H264'))  # 明确指定H.264解码器
+                
                 if not video_stream.isOpened():
                     print(f"Warning: Cannot open video file {fname}")
                     return None
                 
+                # 获取视频信息
                 frame_count = int(video_stream.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = video_stream.get(cv2.CAP_PROP_FPS)
                 
                 if frame_count < self.clip_len + 2:
                     video_stream.release()
@@ -359,22 +446,38 @@ class VideoDataset(Dataset):
                 speed_rate = np.random.randint(1, 3) if frame_count > self.clip_len * 2 + 2 and self.mode == "train" else 1
                 time_index = np.random.randint(frame_count - self.clip_len * speed_rate)
                 
-                # 读取视频帧
+                # 读取视频帧 - 添加错误恢复机制
                 video_frames = []
                 video_stream.set(cv2.CAP_PROP_POS_FRAMES, time_index)
                 
+                consecutive_failures = 0
+                max_consecutive_failures = 5
+                
                 for i in range(self.clip_len * speed_rate):
                     ret, frame = video_stream.read()
+                    
                     if not ret:
-                        break
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            print(f"Too many consecutive frame read failures in {fname}")
+                            break
+                        continue
+                    else:
+                        consecutive_failures = 0
+                    
                     if i % speed_rate == 0:
-                        # 转换颜色空间
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        video_frames.append(frame)
+                        try:
+                            # 转换颜色空间
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            video_frames.append(frame)
+                        except cv2.error as e:
+                            print(f"Color conversion error in {fname}: {e}")
+                            continue
                 
                 video_stream.release()
                 
                 if len(video_frames) < self.clip_len:
+                    print(f"Insufficient frames extracted from {fname}: {len(video_frames)}/{self.clip_len}")
                     return None
                 
                 video = np.array(video_frames[:self.clip_len])
