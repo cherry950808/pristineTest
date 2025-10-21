@@ -99,8 +99,21 @@ def convert_video_format(input_path, output_path=None):
         return False, "FFmpeg not found. Please install FFmpeg."
     except Exception as e:
         return False, f"Conversion error: {str(e)}"
-        torch.backends.cudnn.deterministic = True
-    return 1
+
+def safe_collate_fn(batch):
+    """
+    安全的collate函数，过滤掉None值
+    """
+    # 过滤掉None值
+    batch = [item for item in batch if item is not None]
+    
+    if len(batch) == 0:
+        # 如果所有数据都是None，返回空batch
+        return None
+    
+    # 使用默认的collate函数
+    from torch.utils.data.dataloader import default_collate
+    return default_collate(batch)
 
 
 # class VideoDataset(Dataset):
@@ -312,12 +325,41 @@ class VideoDataset(Dataset):
             folder = Path(directory)
             print("Load dataset from folder : ", folder)
             for label in sorted(os.listdir(folder)):
-                a = os.listdir(os.path.join(folder, label))
-                for fname in os.listdir(os.path.join(folder, label)) if mode == "train" or "weak" or "strong" or "test" else os.listdir(
-                        os.path.join(folder, label))[:10]:
-                    a = fname
-                    self.fnames.append(os.path.join(folder, label, fname))
+                label_path = os.path.join(folder, label)
+                if not os.path.isdir(label_path):
+                    continue
+                    
+                file_list = os.listdir(label_path)
+                if mode not in ["train", "weak", "strong", "test"]:
+                    file_list = file_list[:10]  # 限制测试文件数量
+                
+                print(f"Processing {len(file_list)} files in {label}...")
+                valid_files = 0
+                
+                for fname in file_list:
+                    file_path = os.path.join(label_path, fname)
+                    
+                    # 预验证文件
+                    if fname.endswith(('.mp4', '.avi', '.mov', '.mkv')):
+                        is_valid, _ = validate_video_file(file_path)
+                        if not is_valid:
+                            print(f"Skipping invalid video: {fname}")
+                            continue
+                    elif fname.endswith(('.jpg', '.jpeg', '.png')):
+                        # 验证图片文件
+                        try:
+                            from PIL import Image
+                            with Image.open(file_path) as img:
+                                img.verify()
+                        except Exception:
+                            print(f"Skipping invalid image: {fname}")
+                            continue
+                    
+                    self.fnames.append(file_path)
                     labels.append(label)
+                    valid_files += 1
+                
+                print(f"Valid files in {label}: {valid_files}/{len(file_list)}")
 
         random_list = list(zip(self.fnames, labels))
         random.shuffle(random_list)
@@ -340,9 +382,29 @@ class VideoDataset(Dataset):
         # a = seed
         # print("Random_Seed_State:", a)
         # loading and preprocessing. TODO move them to transform classess
-        buffer = self.loadvideo(self.fnames[index])
-
-        return buffer, self.label_array[index], index
+        
+        # 尝试加载视频，如果失败则重试其他文件
+        max_retries = 5
+        for retry in range(max_retries):
+            try:
+                buffer = self.loadvideo(self.fnames[index])
+                
+                # 如果成功加载且不为None，返回结果
+                if buffer is not None:
+                    return buffer, self.label_array[index], index
+                
+                # 如果返回None，尝试下一个文件
+                print(f"Warning: Failed to load {self.fnames[index]}, trying next file...")
+                index = (index + 1) % len(self.fnames)
+                
+            except Exception as e:
+                print(f"Error loading {self.fnames[index]}: {e}")
+                index = (index + 1) % len(self.fnames)
+        
+        # 如果所有重试都失败，创建一个默认的空白视频
+        print(f"All retries failed, creating default video for index {index}")
+        default_buffer = np.zeros((self.clip_len, 3, self.resize_shape[0], self.resize_shape[1]), dtype=np.float16)
+        return default_buffer, self.label_array[index], index
 
 
     def __len__(self):
@@ -619,7 +681,7 @@ def Get_Dataloader(datapath, mode, bs, resize_shape=[160, 160]):
                            resize_shape=resize_shape)
     Label_dict = dataset.label2index
 
-    dataloader = DataLoader(dataset, batch_size=bs, shuffle=False, num_workers=8)
+    dataloader = DataLoader(dataset, batch_size=bs, shuffle=False, num_workers=8, collate_fn=safe_collate_fn)
 
 
     return dataloader, list(Label_dict.keys())
@@ -664,25 +726,29 @@ def Get_lx_sux_wux_Dataloader_forFire(args, datapath, weak_datapath, strong_data
     labeled_train_dataloader = DataLoader(labeled_train_dataset,
                                           batch_size=bs,
                                           shuffle=True,
-                                          num_workers=8)
+                                          num_workers=8,
+                                          collate_fn=safe_collate_fn)
 
     unlabeled_train_dataloader = DataLoader(unlabeled_train_dataset,
                                             batch_size=u_bs,
                                             sampler=random_sampler,
                                             shuffle=False,
-                                            num_workers=8)
+                                            num_workers=8,
+                                            collate_fn=safe_collate_fn)
 
     unlabeled_weak_dataloader = DataLoader(unlabeled_weak_dataset,
                                            batch_size=u_bs,
                                            sampler=random_sampler,
                                            shuffle=False,
-                                           num_workers=8)
+                                           num_workers=8,
+                                           collate_fn=safe_collate_fn)
 
     unlabeled_strong_dataloader = DataLoader(unlabeled_strong_dataset,
                                              batch_size=u_bs,
                                              sampler=random_sampler,
                                              shuffle=False,
-                                             num_workers=8)
+                                             num_workers=8,
+                                             collate_fn=safe_collate_fn)
 
     return labeled_train_dataloader, unlabeled_train_dataloader, unlabeled_weak_dataloader, unlabeled_strong_dataloader
 
