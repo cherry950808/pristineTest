@@ -274,30 +274,119 @@ class VideoDataset(Dataset):
 
     def __len__(self):
         return len(self.fnames)
+    
+    def apply_light_augmentation(self, image, frame_idx):
+        """
+        对静态图片应用轻微的数据增强，生成不同的帧
+        """
+        # 添加轻微的随机噪声
+        noise = np.random.normal(0, 2, image.shape).astype(np.uint8)
+        frame = np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        
+        # 轻微的亮度变化
+        brightness_factor = 1.0 + np.random.uniform(-0.1, 0.1)
+        frame = np.clip(frame * brightness_factor, 0, 255).astype(np.uint8)
+        
+        # 轻微的对比度变化
+        contrast_factor = 1.0 + np.random.uniform(-0.05, 0.05)
+        frame = np.clip((frame - 128) * contrast_factor + 128, 0, 255).astype(np.uint8)
+        
+        return frame
 
     def loadvideo(self, fname):
         # seed = set_seed(2048)
         # print("Random_Seed_State:",seed)
         # initialize a VideoCapture object to read video data into a numpy array
-        with open(fname, 'rb') as Video_reader:
-            try:
-                video = pk.load(Video_reader)
-            except EOFError:
+        
+        # 根据文件扩展名选择加载方式
+        if fname.endswith('.pkl'):
+            # 原有的PKL加载逻辑
+            with open(fname, 'rb') as Video_reader:
+                try:
+                    video = pk.load(Video_reader)
+                except EOFError:
+                    return None
+
+            while video.shape[0] < self.clip_len + 2:
+                index = np.random.randint(self.__len__())
+                with open(self.fnames[index], 'rb') as Video_reader:
+                    video = pk.load(Video_reader)
+
+            height, width = video.shape[1], video.shape[2]
+
+            speed_rate = np.random.randint(1, 3) if video.shape[0] > self.clip_len * 2 + 2 and self.mode == "train" else 1
+            time_index = np.random.randint(video.shape[0] - self.clip_len * speed_rate)
+
+            video = video[time_index:time_index + (self.clip_len * speed_rate):speed_rate, :, :, :]
+            
+        elif fname.endswith(('.jpg', '.jpeg', '.png')):
+            # JPG/PNG静态图片加载逻辑
+            image = cv2.imread(fname)
+            if image is None:
                 return None
-
-
-
-        while video.shape[0] < self.clip_len + 2:
-            index = np.random.randint(self.__len__())
-            with open(self.fnames[index], 'rb') as Video_reader:
-                video = pk.load(Video_reader)
-
-        height, width = video.shape[1], video.shape[2]
-
-        speed_rate = np.random.randint(1, 3) if video.shape[0] > self.clip_len * 2 + 2 and self.mode == "train" else 1
-        time_index = np.random.randint(video.shape[0] - self.clip_len * speed_rate)
-
-        video = video[time_index:time_index + (self.clip_len * speed_rate):speed_rate, :, :, :]
+            
+            # 转换颜色空间
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # 重复图片生成32帧的"伪视频"
+            video_frames = []
+            for i in range(self.clip_len):
+                # 对图片进行轻微的数据增强，避免完全重复
+                if i == 0:
+                    frame = image.copy()
+                else:
+                    # 添加轻微的随机变化
+                    frame = self.apply_light_augmentation(image, i)
+                video_frames.append(frame)
+            
+            video = np.array(video_frames)
+            
+        elif fname.endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            # MP4等视频文件加载逻辑
+            try:
+                video_stream = cv2.VideoCapture(fname)
+                if not video_stream.isOpened():
+                    print(f"Warning: Cannot open video file {fname}")
+                    return None
+                
+                frame_count = int(video_stream.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+                if frame_count < self.clip_len + 2:
+                    video_stream.release()
+                    return None
+                
+                # 随机选择起始帧
+                speed_rate = np.random.randint(1, 3) if frame_count > self.clip_len * 2 + 2 and self.mode == "train" else 1
+                time_index = np.random.randint(frame_count - self.clip_len * speed_rate)
+                
+                # 读取视频帧
+                video_frames = []
+                video_stream.set(cv2.CAP_PROP_POS_FRAMES, time_index)
+                
+                for i in range(self.clip_len * speed_rate):
+                    ret, frame = video_stream.read()
+                    if not ret:
+                        break
+                    if i % speed_rate == 0:
+                        # 转换颜色空间
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        video_frames.append(frame)
+                
+                video_stream.release()
+                
+                if len(video_frames) < self.clip_len:
+                    return None
+                
+                video = np.array(video_frames[:self.clip_len])
+                
+            except Exception as e:
+                print(f"Error processing video {fname}: {e}")
+                return None
+            
+        else:
+            # 不支持的文件格式
+            print(f"Unsupported file format: {fname}")
+            return None
 
         self.transform = transforms.Compose([
             transforms.Resize([self.resize_shape[0], self.resize_shape[1]]),
@@ -421,9 +510,10 @@ class DataPrefetcher:
         input.record_stream(torch.cuda.current_stream())
 
 
-def Get_Dataloader(datapath, mode, bs):
+def Get_Dataloader(datapath, mode, bs, resize_shape=[160, 160]):
     dataset = VideoDataset(datapath,
-                           mode=mode)
+                           mode=mode,
+                           resize_shape=resize_shape)
     Label_dict = dataset.label2index
 
     dataloader = DataLoader(dataset, batch_size=bs, shuffle=False, num_workers=8)
@@ -431,16 +521,20 @@ def Get_Dataloader(datapath, mode, bs):
 
     return dataloader, list(Label_dict.keys())
 
-def Get_lx_sux_wux_Dataloader_forSI9(args, datapath, weak_datapath, strong_datapath, mode, bs):
+def Get_lx_sux_wux_Dataloader_forFire(args, datapath, weak_datapath, strong_datapath, mode, bs):
+    resize_shape = [args.input_size, args.input_size]
     dataset = VideoDataset(datapath,
-                           mode=mode)
+                           mode=mode,
+                           resize_shape=resize_shape)
 
     weak_dataset = VideoDataset(weak_datapath,
-                                mode='weak')
+                                mode='weak',
+                                resize_shape=resize_shape)
     strong_dataset = VideoDataset(strong_datapath,
-                                  mode='strong')
+                                  mode='strong',
+                                  resize_shape=resize_shape)
 
-    train_labeled_idxs, train_unlabeled_idxs = x_u_split_SI9(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split_Fire(
         args, dataset.label_array)
 
     # train_unlabeled_idxs, _ = x_u_split(
@@ -449,7 +543,8 @@ def Get_lx_sux_wux_Dataloader_forSI9(args, datapath, weak_datapath, strong_datap
     labeled_train_dataset = get_ucf101_ssl(dataset, train_labeled_idxs)
     print("-------------------------------------------")
     dataset = VideoDataset(datapath,
-                           mode=mode)
+                           mode=mode,
+                           resize_shape=resize_shape)
     unlabeled_train_dataset = get_ucf101_ssl(dataset, train_unlabeled_idxs)
     print("-------------------------------------------")
     # dataset = VideoDataset(datapath,
@@ -489,7 +584,7 @@ def Get_lx_sux_wux_Dataloader_forSI9(args, datapath, weak_datapath, strong_datap
     return labeled_train_dataloader, unlabeled_train_dataloader, unlabeled_weak_dataloader, unlabeled_strong_dataloader
 
 
-def Get_lx_sux_wux_Datasets_forSI9(args, datapath, weak_datapath, strong_datapath, mode, bs):
+def Get_lx_sux_wux_Datasets_forFire(args, datapath, weak_datapath, strong_datapath, mode, bs):
     dataset = VideoDataset(datapath,
                            mode=mode)
 
@@ -498,7 +593,7 @@ def Get_lx_sux_wux_Datasets_forSI9(args, datapath, weak_datapath, strong_datapat
     strong_dataset = VideoDataset(strong_datapath,
                                   mode='strong')
 
-    train_labeled_idxs, train_unlabeled_idxs = x_u_split_SI9(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split_Fire(
         args, dataset.label_array)
 
     # train_unlabeled_idxs, _ = x_u_split(
@@ -543,7 +638,7 @@ def adjust_label_per_class(label_per_class, num_labeled):
 
     return label_per_class
 
-def x_u_split_SI9(args, labels):
+def x_u_split_Fire(args, labels):
 
     label_per_class = []
     for i in range(args.num_classes):
