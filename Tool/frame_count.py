@@ -3,7 +3,7 @@ import imageio
 import pickle
 
 # 定义文件夹路径
-folder_path = r'./dataset/FireMatch/Test'
+folder_path = r'./dataset/Custom-Compiled Fire Dataset/Test'
 
 # 初始化总帧数
 total_frames = 0

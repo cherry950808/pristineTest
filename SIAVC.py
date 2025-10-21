@@ -151,7 +151,7 @@ def main():
                         help='number of eval steps to run 768')
     parser.add_argument('--batch-size', default=2, type=int,
                         help='train batchsize')
-    parser.add_argument('--mu', default=2.5, type=float,
+    parser.add_argument('--mu', default=1.5, type=float,
                         help='coefficient of unlabeled batch size  New=4')
     parser.add_argument('--embed-dim', default=384, type=int,
                         help='768-384')
@@ -235,10 +235,10 @@ def main():
 
 
 
-    datapath = ['./dataset/FireMatch/Train']  # 或者你的火灾数据集路径
-    test_datapath = ['./dataset/FireMatch/Test']
-    weak_augmenta_datapath = ['./dataset/FireMatch/Train']
-    strong_augmenta_datapath = ['./dataset/FireMatch/Train']
+    datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']  # 或者你的火灾数据集路径
+    test_datapath = ['./dataset/Custom-Compiled Fire Dataset/Test']
+    weak_augmenta_datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']
+    strong_augmenta_datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']
 
 
     
