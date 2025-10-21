@@ -551,12 +551,21 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
             # -----------------------------------------------------------
 
             # -----------------------------------------------------------------------------
+            # 确保传递给mixup的张量大小一致
+            min_batch_size = min(in_lx2.shape[0], in_ux2.shape[0])
+            if min_batch_size != in_lx2.shape[0] or min_batch_size != in_ux2.shape[0]:
+                print(f"Warning: Adjusting mixup batch sizes to {min_batch_size}")
+                in_lx2 = in_lx2[:min_batch_size]
+                label_onehot = label_onehot[:min_batch_size]
+                in_ux2 = in_ux2[:min_batch_size]
+                logits_u_x = logits_u_x[:min_batch_size]
+            
             mixup_video, mixup_label, mix_indice = mixup(
                 in_lx2,  # (9,96,160,160)*4
                 label_onehot,  # (2,2) [0., 1.]
                 in_ux2,  # (24,96,160,160)
                 logits_u_x, # (8,2) [0.9362, 0.0638]
-                inputs_x.shape[0],
+                min_batch_size,
                 args
             )
             mixup_label = F.softmax(mixup_label, dim=1)

@@ -147,6 +147,15 @@ def mixup(label_img: torch.Tensor, label_onehot: torch.Tensor, unlab_img: torch.
     label_img = label_img[random_indices]
     label_onehot = label_onehot[random_indices]
 
+    # 确保形状匹配，如果不匹配则调整
+    if label_img.shape != unlab_img.shape:
+        min_batch_size = min(label_img.shape[0], unlab_img.shape[0])
+        label_img = label_img[:min_batch_size]
+        label_onehot = label_onehot[:min_batch_size]
+        unlab_img = unlab_img[:min_batch_size]
+        unlabeled_pred = unlabeled_pred[:min_batch_size]
+        print(f"Warning: Adjusted mixup batch sizes to {min_batch_size}")
+    
     assert label_img.shape == unlab_img.shape
     assert label_img.shape.__len__() == 4
     # assert F.one_hot(label_onehot) and simplex(unlabeled_pred)
