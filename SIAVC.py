@@ -15,7 +15,7 @@ import distutils.version
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from utils.kit import get_cosine_schedule_with_warmup,getMaxValue,convert,convert2,deconvert2,entropy_loss, mixup
-from Load_Videos import Get_Dataloader,Get_lx_sux_wux_Dataloader_forSI9
+from Load_Videos import Get_Dataloader,Get_lx_sux_wux_Dataloader_forFire
 from utils import AverageMeter, accuracy
 import torch.distributed as dist
 # from Tool.OTSU import OTSU_threshold
@@ -235,19 +235,19 @@ def main():
 
 
 
-    datapath = ['./dataset/SI9t/Train']
-    test_datapath = ['./dataset/SI9t/Test']
-    weak_augmenta_datapath = ['./dataset/SI9t/Train']
-    strong_augmenta_datapath = ['./dataset/SI9t/Train']
+    datapath = ['./dataset/FireMatch/Train']  # 或者你的火灾数据集路径
+    test_datapath = ['./dataset/FireMatch/Test']
+    weak_augmenta_datapath = ['./dataset/FireMatch/Train']
+    strong_augmenta_datapath = ['./dataset/FireMatch/Train']
 
 
     
-    test_dataloader, label_dict = Get_Dataloader(test_datapath, 'test', 1)
+    test_dataloader, label_dict = Get_Dataloader(test_datapath, 'test', 1, resize_shape=[args.input_size, args.input_size])
     class_dict = label_dict
 
 
     labeled_train_dataloader, unlabeled_train_dataloader, weak_dataloader, strong_dataloader = \
-        Get_lx_sux_wux_Dataloader_forSI9(args,
+        Get_lx_sux_wux_Dataloader_forFire(args,
                                   datapath,
                                   weak_augmenta_datapath,
                                   strong_augmenta_datapath,
@@ -533,8 +533,9 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
             in_lx2, x1, x2 = convert2(list_x_ulb)
             in_ux2, _, _ = convert2(inputs_u_x)
 
-            label_onehot = torch.nn.functional.one_hot(list_y_ulb.to(torch.int64),
-                                                       args.num_classes).squeeze().float().to(args.device)
+            label_onehot = torch.nn.functional.one_hot(
+                list_y_ulb.to(torch.int64), args.num_classes
+            ).float().to(args.device)
 
             logits_u_x,_ = model(inputs_u_x)
 
@@ -703,7 +704,7 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
 
     
 
-    file_path = "SIAVC_pl_acc.txt"
+    file_path = "FireDetection_pl_acc.txt"
     with open(file_path, "w") as file:
         for key, value in acc_dict.items():
             file.write(f"{key}: {value}\n")
@@ -736,8 +737,8 @@ def test(args, test_loader, model, Test):
 
 
     if Test :
-        weights = torch.load('./Pretrained/SIAVC.pth.tar', map_location=args.device)
-        model.load_state_dict(weights['state_dict'], strict=True)
+        # weights = torch.load('./Pretrained/SIAVC.pth.tar', map_location=args.device)
+        # model.load_state_dict(weights['state_dict'], strict=True)
         t_SNE = False
         import matplotlib.pyplot as plt
         from sklearn.manifold import TSNE
@@ -773,7 +774,9 @@ def test(args, test_loader, model, Test):
                 labels.append(targets.cpu().numpy())
 
 
-            prec1_a, prec5_a = accuracy(outputs2, targets, topk=(1,5))
+            # 对于2分类任务，只计算top-1准确率
+            prec1_a, = accuracy(outputs2, targets, topk=(1,))
+            prec5_a = prec1_a  # 对于2分类，top-5等于top-1
 
             _, predicted = outputs2.max(1)
 
