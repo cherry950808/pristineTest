@@ -9,8 +9,8 @@ df = pd.read_excel(xlsx_file)
 column_name = df.columns[5]  # 第六列对应的字段名称
 
 # 获取Train文件夹和Test文件夹的路径
-train_folder = "F:/SI9/Train"
-test_folder = "F:/SI9/Test"
+train_folder = "./dataset/FireMatch/Train"
+test_folder = "./dataset/FireMatch/Test"
 
 # 遍历每一行的字段内容
 for index, row in df.iterrows():
