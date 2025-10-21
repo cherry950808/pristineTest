@@ -19,7 +19,7 @@ from timm.models.registry import register_model
 def _cfg(url='', **kwargs):
     return {
         'url': url,
-        'num_classes': 9,
+        'num_classes': 2,
         'input_size': (3, 220, 220),
         'pool_size': None,
         'crop_pct': .9,
