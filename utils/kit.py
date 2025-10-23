@@ -147,14 +147,12 @@ def mixup(label_img: torch.Tensor, label_onehot: torch.Tensor, unlab_img: torch.
     label_img = label_img[random_indices]
     label_onehot = label_onehot[random_indices]
 
-    # 确保形状匹配，如果不匹配则调整
+     # 确保形状匹配，如果不匹配则跳过mixup
     if label_img.shape != unlab_img.shape:
-        min_batch_size = min(label_img.shape[0], unlab_img.shape[0])
-        label_img = label_img[:min_batch_size]
-        label_onehot = label_onehot[:min_batch_size]
-        unlab_img = unlab_img[:min_batch_size]
-        unlabeled_pred = unlabeled_pred[:min_batch_size]
-        print(f"Warning: Adjusted mixup batch sizes to {min_batch_size}")
+        # print(f"Warning: Skipping mixup due to shape mismatch: {label_img.shape} vs {unlab_img.shape}")
+        # 返回原始数据，不进行mixup，确保设备一致
+        device = label_img.device
+        return label_img, label_onehot, torch.arange(label_img.shape[0], device=device)
     
     assert label_img.shape == unlab_img.shape
     assert label_img.shape.__len__() == 4

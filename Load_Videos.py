@@ -1,10 +1,6 @@
 import os
 from pathlib import Path
 
-# 抑制FFmpeg和OpenCV的警告信息
-os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'fflags;+ignidx'
-os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
-
 import random
 import math
 
@@ -30,90 +26,8 @@ def set_seed(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = False
-
-def validate_video_file(video_path):
-    """
-    验证视频文件是否可以被正确解码
-    """
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return False, "Cannot open video file"
-        
-        # 尝试读取第一帧
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            cap.release()
-            return False, "Cannot read first frame"
-        
-        # 检查帧尺寸
-        height, width = frame.shape[:2]
-        if height <= 0 or width <= 0:
-            cap.release()
-            return False, "Invalid frame dimensions"
-        
-        # 获取总帧数
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0:
-            cap.release()
-            return False, "Invalid frame count"
-        
-        cap.release()
-        return True, f"Valid video: {width}x{height}, {frame_count} frames"
-        
-    except Exception as e:
-        return False, f"Validation error: {str(e)}"
-
-def convert_video_format(input_path, output_path=None):
-    """
-    使用FFmpeg转换视频格式，解决H.264解码问题
-    """
-    import subprocess
-    
-    if output_path is None:
-        # 生成临时文件名
-        base_name = os.path.splitext(input_path)[0]
-        output_path = f"{base_name}_converted.mp4"
-    
-    try:
-        # 使用FFmpeg重新编码视频，确保H.264兼容性
-        cmd = [
-            'ffmpeg', '-i', input_path,
-            '-c:v', 'libx264',  # 使用H.264编码器
-            '-preset', 'fast',   # 快速编码
-            '-crf', '23',        # 质量参数
-            '-c:a', 'aac',       # 音频编码
-            '-y',                # 覆盖输出文件
-            output_path
-        ]
-        
-        # 静默运行FFmpeg
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            return True, output_path
-        else:
-            return False, f"FFmpeg error: {result.stderr}"
-            
-    except FileNotFoundError:
-        return False, "FFmpeg not found. Please install FFmpeg."
-    except Exception as e:
-        return False, f"Conversion error: {str(e)}"
-
-def safe_collate_fn(batch):
-    """
-    安全的collate函数，过滤掉None值
-    """
-    # 过滤掉None值
-    batch = [item for item in batch if item is not None]
-    
-    if len(batch) == 0:
-        # 如果所有数据都是None，返回空batch
-        return None
-    
-    # 使用默认的collate函数
-    from torch.utils.data.dataloader import default_collate
-    return default_collate(batch)
+        torch.backends.cudnn.deterministic = True
+    return 1
 
 
 # class VideoDataset(Dataset):
@@ -324,42 +238,16 @@ class VideoDataset(Dataset):
         for directory in directory_list:
             folder = Path(directory)
             print("Load dataset from folder : ", folder)
+            # 在第240行後添加
+            print("Load dataset from folder : ", folder)
+            print("Found labels:", sorted(os.listdir(folder)))
             for label in sorted(os.listdir(folder)):
-                label_path = os.path.join(folder, label)
-                if not os.path.isdir(label_path):
-                    continue
-                    
-                file_list = os.listdir(label_path)
-                if mode not in ["train", "weak", "strong", "test"]:
-                    file_list = file_list[:10]  # 限制测试文件数量
-                
-                print(f"Processing {len(file_list)} files in {label}...")
-                valid_files = 0
-                
-                for fname in file_list:
-                    file_path = os.path.join(label_path, fname)
-                    
-                    # 预验证文件
-                    if fname.endswith(('.mp4', '.avi', '.mov', '.mkv')):
-                        is_valid, _ = validate_video_file(file_path)
-                        if not is_valid:
-                            print(f"Skipping invalid video: {fname}")
-                            continue
-                    elif fname.endswith(('.jpg', '.jpeg', '.png')):
-                        # 验证图片文件
-                        try:
-                            from PIL import Image
-                            with Image.open(file_path) as img:
-                                img.verify()
-                        except Exception:
-                            print(f"Skipping invalid image: {fname}")
-                            continue
-                    
-                    self.fnames.append(file_path)
+                a = os.listdir(os.path.join(folder, label))
+                for fname in os.listdir(os.path.join(folder, label)) if mode == "train" or "weak" or "strong" or "test" else os.listdir(
+                        os.path.join(folder, label))[:10]:
+                    a = fname
+                    self.fnames.append(os.path.join(folder, label, fname))
                     labels.append(label)
-                    valid_files += 1
-                
-                print(f"Valid files in {label}: {valid_files}/{len(file_list)}")
 
         random_list = list(zip(self.fnames, labels))
         random.shuffle(random_list)
@@ -376,182 +264,46 @@ class VideoDataset(Dataset):
         self.label2index = {label: index for index, label in enumerate(sorted(set(labels)))}
         # convert the list of label names into an array of label indices
         self.label_array = np.array([self.label2index[label] for label in labels], dtype=int)
+        print("Label mapping:", self.label2index)
+        print("Label array shape:", self.label_array.shape)
+        print("Label counts:", np.bincount(self.label_array))
 
     def __getitem__(self, index):
         # seed = set_seed(2048)
         # a = seed
         # print("Random_Seed_State:", a)
         # loading and preprocessing. TODO move them to transform classess
-        
-        # 尝试加载视频，如果失败则重试其他文件
-        max_retries = 5
-        for retry in range(max_retries):
-            try:
-                buffer = self.loadvideo(self.fnames[index])
-                
-                # 如果成功加载且不为None，返回结果
-                if buffer is not None:
-                    return buffer, self.label_array[index], index
-                
-                # 如果返回None，尝试下一个文件
-                print(f"Warning: Failed to load {self.fnames[index]}, trying next file...")
-                index = (index + 1) % len(self.fnames)
-                
-            except Exception as e:
-                print(f"Error loading {self.fnames[index]}: {e}")
-                index = (index + 1) % len(self.fnames)
-        
-        # 如果所有重试都失败，创建一个默认的空白视频
-        print(f"All retries failed, creating default video for index {index}")
-        default_buffer = np.zeros((self.clip_len, 3, self.resize_shape[0], self.resize_shape[1]), dtype=np.float16)
-        return default_buffer, self.label_array[index], index
+        buffer = self.loadvideo(self.fnames[index])
+
+        return buffer, self.label_array[index], index
 
 
     def __len__(self):
         return len(self.fnames)
-    
-    def apply_light_augmentation(self, image, frame_idx):
-        """
-        对静态图片应用轻微的数据增强，生成不同的帧
-        """
-        # 添加轻微的随机噪声
-        noise = np.random.normal(0, 2, image.shape).astype(np.uint8)
-        frame = np.clip(image.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-        
-        # 轻微的亮度变化
-        brightness_factor = 1.0 + np.random.uniform(-0.1, 0.1)
-        frame = np.clip(frame * brightness_factor, 0, 255).astype(np.uint8)
-        
-        # 轻微的对比度变化
-        contrast_factor = 1.0 + np.random.uniform(-0.05, 0.05)
-        frame = np.clip((frame - 128) * contrast_factor + 128, 0, 255).astype(np.uint8)
-        
-        return frame
 
     def loadvideo(self, fname):
         # seed = set_seed(2048)
         # print("Random_Seed_State:",seed)
         # initialize a VideoCapture object to read video data into a numpy array
-        
-        # 根据文件扩展名选择加载方式
-        if fname.endswith('.pkl'):
-            # 原有的PKL加载逻辑
-            with open(fname, 'rb') as Video_reader:
-                try:
-                    video = pk.load(Video_reader)
-                except EOFError:
-                    return None
-
-            while video.shape[0] < self.clip_len + 2:
-                index = np.random.randint(self.__len__())
-                with open(self.fnames[index], 'rb') as Video_reader:
-                    video = pk.load(Video_reader)
-
-            height, width = video.shape[1], video.shape[2]
-
-            speed_rate = np.random.randint(1, 3) if video.shape[0] > self.clip_len * 2 + 2 and self.mode == "train" else 1
-            time_index = np.random.randint(video.shape[0] - self.clip_len * speed_rate)
-
-            video = video[time_index:time_index + (self.clip_len * speed_rate):speed_rate, :, :, :]
-            
-        elif fname.endswith(('.jpg', '.jpeg', '.png')):
-            # JPG/PNG静态图片加载逻辑
-            image = cv2.imread(fname)
-            if image is None:
-                return None
-            
-            # 转换颜色空间
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            
-            # 重复图片生成32帧的"伪视频"
-            video_frames = []
-            for i in range(self.clip_len):
-                # 对图片进行轻微的数据增强，避免完全重复
-                if i == 0:
-                    frame = image.copy()
-                else:
-                    # 添加轻微的随机变化
-                    frame = self.apply_light_augmentation(image, i)
-                video_frames.append(frame)
-            
-            video = np.array(video_frames)
-            
-        elif fname.endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            # MP4等视频文件加载逻辑 - 优化H.264解码
+        with open(fname, 'rb') as Video_reader:
             try:
-                # 首先验证视频文件
-                is_valid, validation_msg = validate_video_file(fname)
-                if not is_valid:
-                    print(f"Video validation failed for {fname}: {validation_msg}")
-                    return None
-                
-                # 设置OpenCV解码参数，减少H.264警告
-                video_stream = cv2.VideoCapture(fname)
-                
-                # 优化解码器参数
-                video_stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 减少缓冲区大小
-                video_stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'H264'))  # 明确指定H.264解码器
-                
-                if not video_stream.isOpened():
-                    print(f"Warning: Cannot open video file {fname}")
-                    return None
-                
-                # 获取视频信息
-                frame_count = int(video_stream.get(cv2.CAP_PROP_FRAME_COUNT))
-                fps = video_stream.get(cv2.CAP_PROP_FPS)
-                
-                if frame_count < self.clip_len + 2:
-                    video_stream.release()
-                    return None
-                
-                # 随机选择起始帧
-                speed_rate = np.random.randint(1, 3) if frame_count > self.clip_len * 2 + 2 and self.mode == "train" else 1
-                time_index = np.random.randint(frame_count - self.clip_len * speed_rate)
-                
-                # 读取视频帧 - 添加错误恢复机制
-                video_frames = []
-                video_stream.set(cv2.CAP_PROP_POS_FRAMES, time_index)
-                
-                consecutive_failures = 0
-                max_consecutive_failures = 5
-                
-                for i in range(self.clip_len * speed_rate):
-                    ret, frame = video_stream.read()
-                    
-                    if not ret:
-                        consecutive_failures += 1
-                        if consecutive_failures >= max_consecutive_failures:
-                            print(f"Too many consecutive frame read failures in {fname}")
-                            break
-                        continue
-                    else:
-                        consecutive_failures = 0
-                    
-                    if i % speed_rate == 0:
-                        try:
-                            # 转换颜色空间
-                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            video_frames.append(frame)
-                        except cv2.error as e:
-                            print(f"Color conversion error in {fname}: {e}")
-                            continue
-                
-                video_stream.release()
-                
-                if len(video_frames) < self.clip_len:
-                    print(f"Insufficient frames extracted from {fname}: {len(video_frames)}/{self.clip_len}")
-                    return None
-                
-                video = np.array(video_frames[:self.clip_len])
-                
-            except Exception as e:
-                print(f"Error processing video {fname}: {e}")
+                video = pk.load(Video_reader)
+            except EOFError:
                 return None
-            
-        else:
-            # 不支持的文件格式
-            print(f"Unsupported file format: {fname}")
-            return None
+
+
+
+        while video.shape[0] < self.clip_len + 2:
+            index = np.random.randint(self.__len__())
+            with open(self.fnames[index], 'rb') as Video_reader:
+                video = pk.load(Video_reader)
+
+        height, width = video.shape[1], video.shape[2]
+
+        speed_rate = np.random.randint(1, 3) if video.shape[0] > self.clip_len * 2 + 2 and self.mode == "train" else 1
+        time_index = np.random.randint(video.shape[0] - self.clip_len * speed_rate)
+
+        video = video[time_index:time_index + (self.clip_len * speed_rate):speed_rate, :, :, :]
 
         self.transform = transforms.Compose([
             transforms.Resize([self.resize_shape[0], self.resize_shape[1]]),
@@ -675,31 +427,26 @@ class DataPrefetcher:
         input.record_stream(torch.cuda.current_stream())
 
 
-def Get_Dataloader(datapath, mode, bs, resize_shape=[160, 160]):
+def Get_Dataloader(datapath, mode, bs):
     dataset = VideoDataset(datapath,
-                           mode=mode,
-                           resize_shape=resize_shape)
+                           mode=mode)
     Label_dict = dataset.label2index
 
-    dataloader = DataLoader(dataset, batch_size=bs, shuffle=False, num_workers=8, collate_fn=safe_collate_fn)
+    dataloader = DataLoader(dataset, batch_size=bs, shuffle=False, num_workers=8)
 
 
     return dataloader, list(Label_dict.keys())
 
 def Get_lx_sux_wux_Dataloader_forFire(args, datapath, weak_datapath, strong_datapath, mode, bs):
-    resize_shape = [args.input_size, args.input_size]
     dataset = VideoDataset(datapath,
-                           mode=mode,
-                           resize_shape=resize_shape)
+                           mode=mode)
 
     weak_dataset = VideoDataset(weak_datapath,
-                                mode='weak',
-                                resize_shape=resize_shape)
+                                mode='weak')
     strong_dataset = VideoDataset(strong_datapath,
-                                  mode='strong',
-                                  resize_shape=resize_shape)
+                                  mode='strong')
 
-    train_labeled_idxs, train_unlabeled_idxs = x_u_split_Fire(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split_SI9(
         args, dataset.label_array)
 
     # train_unlabeled_idxs, _ = x_u_split(
@@ -708,8 +455,7 @@ def Get_lx_sux_wux_Dataloader_forFire(args, datapath, weak_datapath, strong_data
     labeled_train_dataset = get_ucf101_ssl(dataset, train_labeled_idxs)
     print("-------------------------------------------")
     dataset = VideoDataset(datapath,
-                           mode=mode,
-                           resize_shape=resize_shape)
+                           mode=mode)
     unlabeled_train_dataset = get_ucf101_ssl(dataset, train_unlabeled_idxs)
     print("-------------------------------------------")
     # dataset = VideoDataset(datapath,
@@ -726,34 +472,30 @@ def Get_lx_sux_wux_Dataloader_forFire(args, datapath, weak_datapath, strong_data
     labeled_train_dataloader = DataLoader(labeled_train_dataset,
                                           batch_size=bs,
                                           shuffle=True,
-                                          num_workers=8,
-                                          collate_fn=safe_collate_fn)
+                                          num_workers=8)
 
     unlabeled_train_dataloader = DataLoader(unlabeled_train_dataset,
                                             batch_size=u_bs,
                                             sampler=random_sampler,
                                             shuffle=False,
-                                            num_workers=8,
-                                            collate_fn=safe_collate_fn)
+                                            num_workers=8)
 
     unlabeled_weak_dataloader = DataLoader(unlabeled_weak_dataset,
                                            batch_size=u_bs,
                                            sampler=random_sampler,
                                            shuffle=False,
-                                           num_workers=8,
-                                           collate_fn=safe_collate_fn)
+                                           num_workers=8)
 
     unlabeled_strong_dataloader = DataLoader(unlabeled_strong_dataset,
                                              batch_size=u_bs,
                                              sampler=random_sampler,
                                              shuffle=False,
-                                             num_workers=8,
-                                             collate_fn=safe_collate_fn)
+                                             num_workers=8)
 
     return labeled_train_dataloader, unlabeled_train_dataloader, unlabeled_weak_dataloader, unlabeled_strong_dataloader
 
 
-def Get_lx_sux_wux_Datasets_forFire(args, datapath, weak_datapath, strong_datapath, mode, bs):
+def Get_lx_sux_wux_Datasets_forSI9(args, datapath, weak_datapath, strong_datapath, mode, bs):
     dataset = VideoDataset(datapath,
                            mode=mode)
 
@@ -762,7 +504,7 @@ def Get_lx_sux_wux_Datasets_forFire(args, datapath, weak_datapath, strong_datapa
     strong_dataset = VideoDataset(strong_datapath,
                                   mode='strong')
 
-    train_labeled_idxs, train_unlabeled_idxs = x_u_split_Fire(
+    train_labeled_idxs, train_unlabeled_idxs = x_u_split_SI9(
         args, dataset.label_array)
 
     # train_unlabeled_idxs, _ = x_u_split(
@@ -807,7 +549,7 @@ def adjust_label_per_class(label_per_class, num_labeled):
 
     return label_per_class
 
-def x_u_split_Fire(args, labels):
+def x_u_split_SI9(args, labels):
 
     label_per_class = []
     for i in range(args.num_classes):

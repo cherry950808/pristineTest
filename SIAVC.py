@@ -16,6 +16,7 @@ import time
 from simplex import Simplex
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import pandas as pd
 import torch.optim as optim
@@ -94,7 +95,7 @@ def main():
     parser.add_argument('--start-epoch', default=0, type=int,
                         help='manual epoch number (useful on restarts)')
 
-    parser.add_argument('--lr', '--learning-rate', default=0.03, type=float,
+    parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                         help='initial learning rate')
     parser.add_argument('--warmup', default=0, type=float,
                         help='warmup epochs (unlabeled data based)')
@@ -106,11 +107,11 @@ def main():
                         help='use EMA model')
     parser.add_argument('--ema-decay', default=0.999, type=float,
                         help='EMA decay rate')
-    parser.add_argument('--lambda-u', default=1, type=float,
+    parser.add_argument('--lambda-u', default=0.5, type=float,
                         help='coefficient of unlabeled loss')
     parser.add_argument('--T', default=1, type=float,
                         help='pseudo label temperature')
-    parser.add_argument('--threshold', default=0.95, type=float,
+    parser.add_argument('--threshold', default=0.8, type=float,
                         help='pseudo label threshold (default=0.95)')
     parser.add_argument('--out', default='result',
                         help='directory to output the result')
@@ -181,6 +182,23 @@ def main():
 
         from all_model.mae2.videomae2 import VisionTransformer as vit
         model = vit(num_classes=args.num_classes, embed_dim=args.embed_dim, img_size=args.input_size)
+        
+        # 重新初始化分類頭，解決類別偏向問題
+        if hasattr(model, 'head') and isinstance(model.head, nn.Linear):
+            # 使用Xavier初始化權重
+            nn.init.xavier_uniform_(model.head.weight)
+            # 初始化偏置為小的隨機值，避免全0
+            nn.init.normal_(model.head.bias, mean=0.0, std=0.01)
+            print("重新初始化分類頭權重和偏置")
+        # 重新初始化判別器，解決類別偏向問題
+        if hasattr(model, 'discriminator'):
+            for layer in model.discriminator:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.normal_(layer.bias, mean=0.0, std=0.01)
+            print("重新初始化判別器權重和偏置")
+        
         #
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -243,14 +261,14 @@ def main():
 
 
 
-    datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']  # 或者你的火灾数据集路径
-    test_datapath = ['./dataset/Custom-Compiled Fire Dataset/Test']
-    weak_augmenta_datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']
-    strong_augmenta_datapath = ['./dataset/Custom-Compiled Fire Dataset/Train']
+    datapath = ['./dataset/Train']  # 或者你的火灾数据集路径
+    test_datapath = ['./dataset/Test']
+    weak_augmenta_datapath = ['./dataset/Train']
+    strong_augmenta_datapath = ['./dataset/Train']
 
 
     
-    test_dataloader, label_dict = Get_Dataloader(test_datapath, 'test', 1, resize_shape=[args.input_size, args.input_size])
+    test_dataloader, label_dict = Get_Dataloader(test_datapath, 'test', 1)
     class_dict = label_dict
 
 
@@ -551,21 +569,12 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
             # -----------------------------------------------------------
 
             # -----------------------------------------------------------------------------
-            # 确保传递给mixup的张量大小一致
-            min_batch_size = min(in_lx2.shape[0], in_ux2.shape[0])
-            if min_batch_size != in_lx2.shape[0] or min_batch_size != in_ux2.shape[0]:
-                print(f"Warning: Adjusting mixup batch sizes to {min_batch_size}")
-                in_lx2 = in_lx2[:min_batch_size]
-                label_onehot = label_onehot[:min_batch_size]
-                in_ux2 = in_ux2[:min_batch_size]
-                logits_u_x = logits_u_x[:min_batch_size]
-            
             mixup_video, mixup_label, mix_indice = mixup(
                 in_lx2,  # (9,96,160,160)*4
                 label_onehot,  # (2,2) [0., 1.]
                 in_ux2,  # (24,96,160,160)
                 logits_u_x, # (8,2) [0.9362, 0.0638]
-                min_batch_size,
+                inputs_x.shape[0],
                 args
             )
             mixup_label = F.softmax(mixup_label, dim=1)
@@ -583,12 +592,14 @@ def train(args,labeled_train_dataloader, unlabeled_train_dataloader, strong_data
 
 
             ada_reg_loss = F.cross_entropy(mixup_pred, mixup_label, reduction='mean')
-            ada_adv_loss = F.cross_entropy(mixup_cls, mix_indice, reduction='mean')
+            ada_adv_loss = F.cross_entropy(mixup_cls, mix_indice.to(args.device), reduction='mean')
 
             # ada_total_loss = (ada_reg_loss + ada_adv_loss) * 0.1 + ada_labeled_loss * 0.2
             ada_total_loss = ada_reg_loss + ada_adv_loss
 
-            Lx = F.cross_entropy(logits_x, targets_x.long().cuda(), reduction='mean')
+            # 添加類別權重來平衡Fire和NoFire
+            class_weights = torch.tensor([1.0, 1.7]).to(args.device)  # 給NoFire更高權重
+            Lx = F.cross_entropy(logits_x, targets_x.long().cuda(), weight=class_weights, reduction='mean')
 
 
 
@@ -748,6 +759,9 @@ def test(args, test_loader, model, Test):
     class_acc_num = [0.0] * args.num_classes
     result_list = [] * args.num_classes
     result_num_list = [0.0] * args.num_classes
+    
+    # 添加預測分布統計
+    pred_distribution = [0.0] * args.num_classes  # 統計預測分布
 
 
 
@@ -801,9 +815,14 @@ def test(args, test_loader, model, Test):
                 class_num[targets[i]] += 1.0
 
                 index = predicted.tolist()
+                pred_distribution[index[i]] += 1.0  # 統計預測分布
 
                 if index[i] == (targets[i]):
                     class_acc_num[index[i]] += 1.0
+                
+                # 添加調試信息：統計預測分布
+                if batch_idx == 0 and i < 5:  # 只在第一個batch的前5個樣本打印
+                    print(f"Sample {i}: True={targets[i].item()}, Pred={index[i]}")
 
 
 
@@ -827,6 +846,15 @@ def test(args, test_loader, model, Test):
                     top5_a=top5_a.avg,
                 ))
 
+        # 打印預測分布統計
+        print(f"Prediction distribution: {pred_distribution}")
+        print(f"True distribution: {class_num}")
+        
+        # 計算預測偏向程度
+        fire_pred_ratio = pred_distribution[0] / sum(pred_distribution) if sum(pred_distribution) > 0 else 0
+        nofire_pred_ratio = pred_distribution[1] / sum(pred_distribution) if sum(pred_distribution) > 0 else 0
+        print(f"Prediction bias: Fire={fire_pred_ratio:.2f}, NoFire={nofire_pred_ratio:.2f}")
+        
         for i in range(len(class_num)):
             result = class_acc_num[i] / class_num[i]
             result_list.append(result)
@@ -842,7 +870,7 @@ def test(args, test_loader, model, Test):
 
     logger.info("top-1-a acc: {:.2f}".format(top1_a.avg))
     logger.info("top-5-a acc: {:.2f}".format(top5_a.avg))
-    return losses.avg, top1_a.avg, top5_a.avg, result_list, class_acc_num
+    return losses.avg, top1_a.avg, top5_a.avg, result_list, class_num
 
 
 
